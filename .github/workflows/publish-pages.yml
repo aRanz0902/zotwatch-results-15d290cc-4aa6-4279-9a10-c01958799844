@@ -1,0 +1,57 @@
+name: Publish ZotWatch Pages
+run-name: ZotWatch Pages source ${{ github.event.client_payload.source_run_id }} package ${{ github.event.client_payload.artifact_id }}
+on:
+  repository_dispatch:
+    types: [zotwatch-pages]
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: zotwatch-pages
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Receive public page files
+        env:
+          PACKAGE_URL: ${{ github.event.client_payload.package_url }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import io, os, stat, zipfile
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          from urllib.request import urlopen
+          value = os.environ['PACKAGE_URL']
+          url = urlsplit(value)
+          if url.scheme != 'https' or url.username or url.password or url.port or not url.hostname.endswith('.blob.core.windows.net'):
+              raise ValueError('Invalid page package location')
+          with urlopen(value, timeout=60) as response:
+              data = response.read(8 * 1024 * 1024 + 1)
+          if len(data) > 8 * 1024 * 1024:
+              raise ValueError('Page package too large')
+          target = Path(os.environ['RUNNER_TEMP']) / 'public'
+          target.mkdir()
+          with zipfile.ZipFile(io.BytesIO(data)) as archive:
+              names = archive.namelist()
+              if len(names) != 3 or set(names) != {'feed.xml', 'feed.xsl', 'index.html'}:
+                  raise ValueError('Unexpected page package contents')
+              if sum(f.file_size for f in archive.infolist()) > 16 * 1024 * 1024:
+                  raise ValueError('Expanded page package too large')
+              for entry in archive.infolist():
+                  if stat.S_ISLNK(entry.external_attr >> 16):
+                      raise ValueError('Page links are not allowed')
+                  (target / entry.filename).write_bytes(archive.read(entry))
+          PY
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
+        with:
+          path: ${{ runner.temp }}/public
+          retention-days: 1
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e
+        id: deployment
